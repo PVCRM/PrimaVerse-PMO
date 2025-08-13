@@ -1,0 +1,97 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuthenticated() { return request.auth != null; }
+    function getUser(uid) { return get(/databases/$(database)/documents/users/$(uid)).data; }
+    function role() { return getUser(request.auth.uid).role; }
+    function isAtLeast(r) {
+      let h = {'Employee':0,'Team Lead':1,'Project Manager':2,'Director/VP/CXO':3,'Super Admin':4};
+      return h[role()] >= h[r];
+    }
+
+    // Employee may read ONLY their reviewer/PM/DU lead profiles
+    function isMyManager(targetId) {
+      let me = getUser(request.auth.uid);
+      return me != null && (
+        me.reviewerId == targetId ||
+        me.projectManagerId == targetId ||
+        me.duLeadId == targetId
+      );
+    }
+    
+    function isLeadership(targetId) {
+      let r = getUser(targetId).role;
+      return r == 'Team Lead' || r == 'Project Manager' || r == 'Director/VP/CXO' || r == 'Super Admin';
+    }
+
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (
+        request.auth.uid == userId ||  // self
+        isAtLeast('Team Lead') ||      // managers+
+        isMyManager(userId) ||         // my reviewer/PM/DU
+        isLeadership(userId)           // any manager
+      );
+      allow update: if isAuthenticated() && request.auth.uid == userId;
+      allow create, delete: if isAtLeast('Super Admin');
+    }
+
+    match /clients/{clientId} {
+      // employees must see client name → read for all signed-in users
+      allow read: if isAuthenticated();
+      allow create, update, delete: if isAtLeast('Project Manager');
+    }
+
+    match /projects/{projectId} {
+      // employees can read projects they are on (teamIds contains them)
+      allow read: if isAuthenticated() && (
+        isAtLeast('Team Lead') ||
+        (resource.data.teamIds != null &&
+         resource.data.teamIds.hasAny([request.auth.uid]))
+      );
+      allow create, update, delete: if isAtLeast('Team Lead');
+    }
+
+    match /tasks/{taskId} {
+      allow read: if isAuthenticated() && (
+        isAtLeast('Team Lead') ||
+        resource.data.assigneeId == request.auth.uid ||
+        resource.data.reviewerId == request.auth.uid
+      );
+      allow create: if isAuthenticated() && isAtLeast('Team Lead');
+      allow update: if isAuthenticated() && (
+        isAtLeast('Team Lead') ||
+        resource.data.assigneeId == request.auth.uid
+      );
+      allow delete: if isAuthenticated() && isAtLeast('Project Manager');
+    }
+
+    match /timesheet/{entryId} {
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid ||
+        isAtLeast('Team Lead')
+      );
+      allow create, update, delete: if isAuthenticated() &&
+        request.auth.uid == request.resource.data.userId;
+    }
+
+    match /user-sessions/{sessionId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create, update: if isAuthenticated() && request.auth.uid == request.resource.data.userId;
+      allow delete: if isAtLeast('Super Admin');
+    }
+
+    match /roleRequests/{requestId} {
+      allow read, write: if isAuthenticated() && isAtLeast('Super Admin');
+    }
+    match /profileChangeRequests/{requestId} {
+      allow read, write: if isAuthenticated() && isAtLeast('Super Admin');
+    }
+
+    match /app-config/{id} { allow read: if isAuthenticated(); allow write: if isAtLeast('Super Admin'); }
+    match /departments/{id} { allow read: if isAuthenticated(); allow write: if isAtLeast('Super Admin'); }
+    match /designations/{id} { allow read: if isAuthenticated(); allow write: if isAtLeast('Super Admin'); }
+    match /projectTypes/{id} { allow read: if isAuthenticated(); allow write: if isAtLeast('Super Admin'); }
+    match /taskTypes/{id} { allow read: if isAuthenticated(); allow write: if isAtLeast('Super Admin'); }
+  }
+}
